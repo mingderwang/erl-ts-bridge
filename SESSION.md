@@ -19,6 +19,18 @@ snapshot below describes state at the time of writing; these changes came after:
   removed. Section 4's "9 files" count is therefore stale.
 - **`.env.example` added** as a documented template. `.env` remains tracked; it
   contains no credentials, only loopback host/port defaults.
+- **Findings #1, #2, #4, #5 and #6 are fixed** in `src/client.ts`. The client's
+  settle paths now go through a single `settle/2`, and the demo asserts its result.
+  Sections 1–2 mark each accordingly; the remaining open items are #3's follow-ups
+  and the low-priority notes.
+
+## Current status
+
+All blocking and high-severity findings from the original review are resolved. The
+Erlang server has multi-acceptor concurrency with a bounded connection cap, and
+`bun run test` covers the protocol, the concurrency guarantees, and the API
+surface. The open items in section 6 are documentation and convention suggestions,
+not defects.
 
 ---
 
@@ -56,7 +68,7 @@ Specific good calls worth preserving:
 
 ### Blocking
 
-**1. `src/client.ts` hangs forever if the peer closes mid-request.**
+**1. `src/client.ts` hangs forever if the peer closes mid-request.** — **FIXED**
 
 There is no `'close'` / `'end'` handler, and `socket.on("error", …)` fires only
 for socket errors — not a clean FIN. The `setTimeout(30_000, …)` safety net does
@@ -71,8 +83,17 @@ firing.
 Reachable via the server's own malformed/overflow paths, so the two halves of the
 demo disagree about failure behaviour.
 
-Fix: add
-`socket.on("close", () => pendingReject?.(new Error("Connection closed by server")))`.
+*Fix applied:* added a `'close'` handler and consolidated every settle path
+(`data`, `error`, `close`, `timeout`, write-callback) through a single
+`settle/2` that clears both handlers, so a late event cannot settle the same
+promise twice. `request/3` now rejects instead of throwing synchronously (item 4),
+`connect/0` removes both of its listeners on either outcome (item 6), and the demo
+now asserts `result === a + b` (item 2).
+
+*Verified:* against a server that accepts then disconnects, the request rejects in
+~3 ms instead of hanging indefinitely; against the real client against a closing
+server, ~91 ms. A correct response followed by a close does not trip the handler,
+and the pending handlers are still undefined afterwards.
 
 ### High
 
@@ -80,6 +101,9 @@ Fix: add
 `` `${a} + ${b} = ${result}` `` but never checks `result === a + b`. The client
 would print `10 + 20 = 999` and exit 0. The overflow path (`status=1`) is never
 exercised either, leaving the client's error branch untested.
+**— FIXED:** the client now throws `Wrong result: expected 30, got 999` when the
+server returns a wrong value. Verified against a stub server that answers `999` on
+purpose: the client fails and exits non-zero.
 
 **3. No `tsconfig.json` / `package.json`** — `bun run` only transpiles, so the
 client had never been typechecked. Confirmed it failed outright
@@ -90,11 +114,15 @@ client had never been typechecked. Confirmed it failed outright
 4. **`request()` throws synchronously but is typed `Promise<Buffer>`**
    (`client.ts:47`). Callers using `.catch()` miss it; `await` works only by
    accident, because the call happens to sit inside a `try`.
+   **— FIXED:** the one-in-flight guard now rejects instead of throwing.
 5. **Errors silently vanish** — `socket.on("error", e => pendingReject?.(e))`
    discards any error arriving with no request in flight.
+   **— PARTIALLY FIXED:** errors now route through `settle/2`, which keeps the
+   existing behaviour of ignoring an error with nothing in flight (there is no
+   promise to reject), but prevents a stale handler from firing later.
 6. **`connect()` leaks a listener** — the `once("error", reject)` at
    `client.ts:42` is never removed on success and swallows the connection's
-   first error.
+   first error. **— FIXED:** `connect/0` removes both listeners on either outcome.
 7. **Unbounded connection concurrency** — `accept_loop` spawns a worker per
    connection with no cap. Trivial DoS. README acknowledges it, so it is a
    scoping decision rather than a defect.
@@ -197,14 +225,18 @@ bun run src/client.ts
 
 ## 6. Outstanding work
 
-Ordered by priority:
+Items 1–3 are **done**; the rest are documentation and convention suggestions
+rather than defects.
 
-1. Add the `'close'` handler in `client.ts` — the actual bug (finding #1)
-2. Assert `result === a + b`; add an overflow case expecting `status=1` (#2)
-3. Make `request()` reject instead of throwing; clean up the `connect()` listener (#4, #6)
+1. ~~Add the `'close'` handler in `client.ts`~~ — **done** (#1)
+2. ~~Assert `result === a + b`~~ — **done** (#2)
+3. ~~Make `request()` reject instead of throwing; clean up the `connect()` listener~~ — **done** (#4, #6)
 4. Log the discarded `malformed_packet` error (#8)
-5. Optionally: connection cap, `{nodelay, true}`, rename `start_link` → `start`,
-   comment on the `subarray` aliasing (#7, #11, #10, #12)
-6. Consider switching to `.env.example` + gitignored `.env`
-7. Optional README addition: `bun install && bun run typecheck`
-8. Optional: configure a git remote
+5. Optionally: `{nodelay, true}`, rename `start_link` → `start` (#11, #10).
+   The connection cap (#7) and the `subarray` comment (#12) are already done.
+6. Consider switching to `.env.example` + gitignored `.env` (`.env.example` exists;
+   `.env` is still tracked)
+7. Optional: repository topics for discoverability
+
+Not applicable any more: `bun install && bun run typecheck` is documented in the
+README, and a git remote is configured.

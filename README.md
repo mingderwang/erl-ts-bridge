@@ -136,7 +136,7 @@ For production, add TLS or private-network authentication, request deadlines, ve
 
 ## Known limitations
 
-- **The client can hang on disconnect.** `src/client.ts` has no `close` handler, so a peer disconnecting mid-request never settles the pending promise. See `SESSION.md` finding #1.
-- The client prints results without asserting `result === a + b`, and never exercises the `status=1` overflow branch.
 - A duplicate server launch on the same port is silent rather than an error (see above).
-- Malformed traffic is not logged.
+- Malformed traffic is not logged; a client sending garbage leaves no trace.
+- The client handles one in-flight request at a time, by design. There is no multiplexing or request pipelining.
+- Neither side negotiates a protocol version.

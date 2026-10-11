@@ -20,3 +20,13 @@ All multi-byte integers are big-endian. TCP frames have a 4-byte unsigned big-en
 | 5 | 8 | Result, signed 64-bit; zero on error |
 
 Unknown or malformed requests close the connection. This minimal protocol is illustrative; production services should define version negotiation, deadlines, request limits, authentication, and explicit error codes.
+
+## Connection-level behaviour
+
+This section describes the reference server, not the wire format.
+
+- Frames are capped at 1 MiB. A larger declared length is a malformed frame.
+- Requests on a single connection are processed strictly sequentially: one request is read, answered, and only then is the next read.
+- An idle connection is closed after 30 s. The receive timeout is per request, so a connection that keeps sending can stay open indefinitely.
+- When the concurrent-connection cap is reached, incoming connections are closed immediately rather than queued.
+- A 64-bit sum that would overflow returns `status=1` with a zero result rather than wrapping.

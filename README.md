@@ -50,6 +50,7 @@ Other scripts:
 | `bun run server` | Compile `bridge_server.erl`, then start it on port 4040 |
 | `bun run start` | Run the client (`src/client.ts`) |
 | `bun run typecheck` | Type-check the client with `tsc --noEmit` |
+| `bun run test` | Run the EUnit suite for the Erlang server |
 
 ## Running the server by hand
 
@@ -100,6 +101,14 @@ Because every listening socket sets `SO_REUSEPORT`, starting a **second** server
 | `stop(Pids)` | Stop the server; accepts a pid or list of pids |
 
 `start_link/1,2,3` returns `{ok, Pids}` or `{error, Reason}`. If any acceptor fails to bind, the ones that already started are stopped, so no listener is left behind. It is linked to the calling process and is not an OTP behaviour process — there is no supervision tree, and `stop/1` returns before the listeners have actually closed (allow up to 1000 ms).
+
+## Tests
+
+```sh
+bun run test
+```
+
+The EUnit suite in `test/bridge_server_tests.erl` covers the protocol (arithmetic, 64-bit boundaries and overflow, malformed frames), the concurrency guarantees (the connection cap holds and slots are reclaimed), and the API surface. It also asserts the multi-instance behaviour described above, so removing `{reuseport, true}` fails the suite rather than silently changing semantics. Each test uses its own port, so they can run alongside a server on 4040.
 
 ## Run the client on another machine
 

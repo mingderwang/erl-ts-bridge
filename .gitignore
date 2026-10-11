@@ -4,6 +4,7 @@ bun.lockb
 
 # Erlang build artifacts
 erlang/*.beam
+test/*.beam
 erl_crash.dump
 
 # OS

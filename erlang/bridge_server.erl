@@ -2,25 +2,26 @@
 %%
 %% Concurrency model: N acceptor processes, one worker per connection.
 %% Each acceptor owns its own listening socket bound to the same port via
-%% `SO_REUSEPORT`, so the kernel distributes incoming connections across
-%% them. Acceptors never handle requests themselves -- they accept a
+%% <code>SO_REUSEPORT</code>, so the kernel distributes incoming connections
+%% across them. Acceptors never handle requests themselves -- they accept a
 %% socket, transfer ownership to a freshly spawned worker, and loop.
 %%
 %% Each worker serves one connection strictly sequentially, which matches
 %% the protocol's lockstep semantics. Sockets use passive mode
-%% (`{active, false}`), so a slow client only ever blocks its own worker.
+%% (<code>{active, false}</code>), so a slow client only ever blocks its
+%% own worker.
 %% Every blocking call has an explicit timeout: 1000 ms for accept, 30 s
 %% for receive.
 %%
-%% A shared `atomics` counter caps concurrent workers. When the cap is
-%% reached, incoming connections are closed immediately rather than
+%% A shared <code>atomics</code> counter caps concurrent workers. When the
+%% cap is reached, incoming connections are closed immediately rather than
 %% queued.
 %%
-%% Because every socket sets `SO_REUSEPORT`, a second server instance on
-%% the same port does NOT fail with `eaddrinuse`; it binds successfully
-%% and the kernel splits connections between the instances. This is
-%% deliberate and allows scaling across processes and hosts, but it also
-%% means a duplicate launch is not reported as an error.
+%% Because every socket sets <code>SO_REUSEPORT</code>, a second server
+%% instance on the same port does NOT fail with <code>eaddrinuse</code>; it
+%% binds successfully and the kernel splits connections between the
+%% instances. This is deliberate and allows scaling across processes and
+%% hosts, but it also means a duplicate launch is not reported as an error.
 %%
 %% This is a protocol example, not a production service. It has no
 %% authentication, no TLS, no request deadlines, and no monitoring.
@@ -41,11 +42,12 @@ start_link(Port, AcceptorCount) ->
     start_link(Port, AcceptorCount, undefined).
 
 %% @doc Starts the server with an explicit acceptor count and connection cap.
-%% Pass `undefined` for either argument to take the default.
+%% Pass <code>undefined</code> for either argument to take the default.
 %%
-%% Returns `{ok, Pids}` where `Pids` is a list of acceptor processes, or
-%% `{error, Reason}`. If any acceptor fails to bind, the ones that already
-%% started are stopped, so no listener is left behind.
+%% Returns <code>{ok, Pids}</code> where <code>Pids</code> is a list of
+%% acceptor processes, or <code>{error, Reason}</code>. If any acceptor fails
+%% to bind, the ones that already started are stopped, so no listener is
+%% left behind.
 start_link(Port, AcceptorCount, MaxConnections)
   when is_integer(Port), Port > 0, Port < 65536 ->
     Count = acceptor_count(AcceptorCount),
@@ -81,7 +83,7 @@ connection_limit(N) when is_integer(N), N > 0 ->
 connection_limit(_Other) ->
     connection_limit().
 
-%% Reserves one connection slot, or returns `full` when the cap is
+%% Reserves one connection slot, or returns <code>full</code> when the cap is
 %% already reached. Compare-and-exchange so concurrent acceptors cannot
 %% both observe a free slot and overshoot the limit.
 acquire_slot(Conns, Limit) ->
@@ -112,9 +114,9 @@ await_start(Pids, Started) ->
         {error, acceptor_start_timeout}
     end.
 
-%% @doc Stops the server. Accepts the list returned by `start_link/1,2,3`,
+%% @doc Stops the server. Accepts the list returned by <code>start_link/1,2,3</code>,
 %% or a single acceptor pid. Each acceptor stops within 1000 ms of being
-%% signalled, since it only checks for `stop` between accepts.
+%% signalled, since it only checks for <code>stop</code> between accepts.
 stop(Pids) when is_list(Pids) ->
     [P ! stop || P <- Pids],
     ok;
@@ -123,8 +125,8 @@ stop(Pid) when is_pid(Pid) ->
     ok.
 
 %% @private
-%% One acceptor. `{reuseport, true}` lets every acceptor -- and any other
-%% server instance on this host -- bind the same port; the kernel then
+%% One acceptor. <code>{reuseport, true}</code> lets every acceptor -- and any
+%% other server instance on this host -- bind the same port; the kernel then
 %% distributes connections between them.
 acceptor(Parent, Port, Conns, Limit) ->
     case gen_tcp:listen(Port, [
@@ -166,8 +168,8 @@ accept_loop(ListenSocket, Conns, Limit) ->
                             ok ->
                                 Worker ! {serve, Socket};
                             {error, _} ->
-                                %% `exit(Pid, kill)` is untrappable, so the
-                                %% worker's `after` will not run. Release here.
+                                %% <code>exit(Pid, kill)</code> is untrappable, so the
+                                %% worker's <code>after</code> will not run. Release here.
                                 atomics:sub(Conns, 1, 1),
                                 exit(Worker, kill),
                                 gen_tcp:close(Socket)

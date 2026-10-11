@@ -51,6 +51,7 @@ Other scripts:
 | `bun run start` | Run the client (`src/client.ts`) |
 | `bun run typecheck` | Type-check the client with `tsc --noEmit` |
 | `bun run test` | Run the EUnit suite for the Erlang server |
+| `bun run docs` | Generate the Erlang API reference into `doc/` |
 
 ## Running the server by hand
 
@@ -101,6 +102,20 @@ Because every listening socket sets `SO_REUSEPORT`, starting a **second** server
 | `stop(Pids)` | Stop the server; accepts a pid or list of pids |
 
 `start_link/1,2,3` returns `{ok, Pids}` or `{error, Reason}`. If any acceptor fails to bind, the ones that already started are stopped, so no listener is left behind. It is linked to the calling process and is not an OTP behaviour process — there is no supervision tree, and `stop/1` returns before the listeners have actually closed (allow up to 1000 ms).
+
+### Generated API reference
+
+The module carries edoc comments. To render them as HTML:
+
+```sh
+bun run docs          # writes doc/ (gitignored)
+```
+
+Then open `doc/index.html` in a browser, or serve it:
+
+```sh
+python3 -m http.server 8765 --directory doc
+```
 
 ## Tests
 

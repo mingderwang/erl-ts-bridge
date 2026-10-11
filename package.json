@@ -6,7 +6,8 @@
     "server": "erlc -o erlang erlang/bridge_server.erl && erl -noshell -pa erlang -eval 'case bridge_server:start_link(4040) of {ok, _Pid} -> receive stop -> ok end; Error -> io:format(\"~p~n\", [Error]), halt(1) end.'",
     "test": "erlc -o erlang erlang/bridge_server.erl test/bridge_server_tests.erl && erl -noshell -pa erlang -eval 'case eunit:test(bridge_server_tests, [verbose]) of ok -> halt(0); _ -> halt(1) end.'",
     "start": "bun run src/client.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "docs": "erl -noshell -eval 'case edoc:files([\"erlang/bridge_server.erl\"], [{dir, \"doc\"}, {preamble, \"bridge_server\"}]) of ok -> halt(0); _ -> halt(1) end.'"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

@@ -1,0 +1,13 @@
+{
+  "name": "erl-ts-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/client.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -2,13 +2,22 @@
 node_modules/
 bun.lockb
 
+# rebar3 build output and downloaded dependencies
+_build/
+.rebar3/
+rebar3.crashdump
+
 # Erlang build artifacts
 erlang/*.beam
-test/*.beam
+*.beam
 erl_crash.dump
 
 # Generated edoc output (rebuild with `bun run docs`)
 doc/
+
+# TLS material must never be committed
+*.pem
+*.key
 
 # OS
 .DS_Store

@@ -1,29 +1,26 @@
 # Erlang ↔ Bun/TypeScript TCP bridge
 
-A minimal, dependency-free example of a persistent TCP connection between an Erlang/OTP server and a Bun + TypeScript client on different machines.
+A persistent TCP connection between an Erlang/OTP server and a Bun +
+TypeScript client, with authentication, optional TLS, metrics, and a
+supervision tree.
+
+It deliberately does one thing — send a signed 64-bit addition over a
+framed socket and read the reply — so the interesting content is the
+plumbing rather than the arithmetic.
 
 ## Requirements
 
-- Erlang/OTP (`erl` and `erlc`)
+- Erlang/OTP 29+ (`erl`, `erlc`, `rebar3`)
 - Bun
-
-## Protocol
-
-TCP frames use a 4-byte unsigned big-endian payload length prefix (`{packet, 4}` on the Erlang side).
-
-Request payload (21 bytes): request ID (4-byte unsigned), opcode (1 byte; `1` means add), A (8-byte signed integer), B (8-byte signed integer). All multi-byte values are big-endian.
-
-Response payload (13 bytes): request ID (4-byte unsigned), status (1 byte; `0` success, `1` error), result (8-byte signed integer).
-
-This starter implementation handles requests sequentially per connection. It is a protocol example, not a performance benchmark or production-ready service.
 
 ## Quick start
 
 ```sh
 bun install
+rebar3 compile
 ```
 
-**Terminal 1 — server.** Compiles the module and binds the port:
+**Terminal 1 — server.** Compiles and binds port 4040:
 
 ```sh
 bun run server
@@ -41,81 +38,159 @@ Expected output:
 10 + 20 = 30
 9000000000 + 1 = 9000000001
 -2 + 7 = 5
+max + 1 correctly reported as overflow
 ```
 
-Other scripts:
+### Scripts
 
 | Script | Purpose |
 |---|---|
-| `bun run server` | Compile `bridge_server.erl`, then start it on port 4040 |
-| `bun run start` | Run the client (`src/client.ts`) |
-| `bun run typecheck` | Type-check the client with `tsc --noEmit` |
-| `bun run test` | Run the EUnit suite for the Erlang server |
-| `bun run docs` | Generate the Erlang API reference into `doc/` |
+| `bun run server` | Start the server on port 4040 (foreground) |
+| `bun run console` | Interactive Erlang shell with the app loaded |
+| `bun run start` | Run the client |
+| `bun run test` | Run the EUnit suite |
+| `bun run typecheck` | Type-check the client |
+| `bun run lint` | Run xref and dialyzer |
+| `bun run docs` | Generate the edoc HTML reference into `doc/` |
+| `bun run check` | Compile, xref, eunit, dialyzer, typecheck |
 
-## Running the server by hand
+## Protocol
 
-`bun run server` is only a wrapper. The underlying steps are:
+Version 2, with a mandatory HELLO handshake before any request: the client
+proposes a protocol version and its auth token, and the server replies with
+the version it will speak. See [PROTOCOL.md](PROTOCOL.md) for the byte
+layout.
+
+Version 1 was unauthenticated and is **no longer accepted**. A client
+speaking v1 gets a `HELLO_BAD_VERSION` acknowledgement and is disconnected.
+
+## Configuration
+
+Resolved once at startup, in increasing order of precedence: built-in
+defaults, the application environment (`sys.config`), `ERL_BRIDGE_*`
+environment variables, then arguments passed to `bridge_server:start/1`.
+
+| Setting | Env var | Default | Meaning |
+|---|---|---|---|
+| `port` | `ERL_BRIDGE_PORT` | 4040 | Listen port; 0 asks the OS |
+| `acceptor_count` | `ERL_BRIDGE_ACCEPTORS` | schedulers, max 8 | Acceptor processes |
+| `max_connections` | `ERL_BRIDGE_MAX_CONNECTIONS` | 128 | Global concurrent worker cap |
+| `max_frame_size` | `ERL_BRIDGE_MAX_FRAME_SIZE` | 1 MiB | Largest accepted frame |
+| `handshake_timeout` | `ERL_BRIDGE_HANDSHAKE_TIMEOUT` | 5000 ms | HELLO deadline |
+| `request_timeout` | `ERL_BRIDGE_REQUEST_TIMEOUT` | 30000 ms | Per-request idle deadline |
+| `shutdown_grace` | `ERL_BRIDGE_SHUTDOWN_GRACE` | 5000 ms | Graceful stop budget |
+| `token` | `ERL_BRIDGE_TOKEN` | *none* | Shared secret; auth is off when unset |
+| `reuseport` | `ERL_BRIDGE_REUSEPORT` | `true` | `SO_REUSEPORT` on the listener |
+| `tls` | `ERL_BRIDGE_TLS_CERTFILE` + `ERL_BRIDGE_TLS_KEYFILE` | *none* | Enables TLS |
+| `metrics_port` | `ERL_BRIDGE_METRICS_PORT` | *none* | Enables the `/metrics` endpoint |
+
+Everything is validated at boot: a bad value fails with one clear message
+rather than surfacing as a confusing error in an acceptor ten seconds
+later. No long-lived process reads the environment, so exporting a
+variable cannot silently reconfigure a running server.
+
+### Authentication
+
+Set a token and every client must present it in the HELLO handshake:
 
 ```sh
-mkdir -p erlang
-erlc -o erlang erlang/bridge_server.erl
-erl -noshell -pa erlang -eval '
-  case bridge_server:start_link(4040) of
-    {ok, _Pids} -> receive stop -> ok end;
-    Error -> io:format("~p~n", [Error]), halt(1)
-  end.'
+export ERL_BRIDGE_TOKEN="$(openssl rand -hex 32)"
 ```
 
-Note that `start_link/1` returns a **list** of acceptor pids, not a single pid. `bridge_server:stop/1` accepts either the list or one pid.
+Comparison uses `crypto:hash_equals/2`, so a wrong token takes the same
+time regardless of how many leading bytes were right.
 
-## Concurrency model
+**With no token configured, authentication is off** and any peer that
+connects can send requests. The server logs a warning at boot saying so —
+"no auth" is a visible choice, never a silent default.
 
-The server runs a fixed set of **acceptor** processes and one **worker** per connection:
+### TLS
 
-- Each acceptor owns its own listening socket, all bound to the same port with `SO_REUSEPORT`. The kernel distributes incoming connections across them, so accepting runs in parallel rather than serialising behind a single accept loop.
-- An acceptor never handles requests. It accepts a socket, spawns a worker, transfers socket ownership to it, and loops.
-- Each worker serves one connection strictly sequentially, matching the protocol's lockstep semantics. Sockets use passive mode (`{active, false}`), so a slow client only ever blocks its own worker.
-- Every blocking call has an explicit timeout: 1000 ms for accept, 30 s for receive. An idle connection is closed after 30 s.
-- A shared `atomics` counter caps concurrent workers (default 128). Past the cap, new connections are closed immediately rather than queued.
+Optional, off by default. Supply a certificate and key:
 
-Defaults follow the machine: the acceptor count is the number of online schedulers, capped at 8. Override either with `start_link/3`:
-
-```erlang
-%% 4 acceptors, at most 32 concurrent workers
-{ok, Pids} = bridge_server:start_link(4040, 4, 32).
+```sh
+export ERL_BRIDGE_TLS_CERTFILE=cert.pem
+export ERL_BRIDGE_TLS_KEYFILE=key.pem
+bun run server
 ```
 
-### Multiple instances share the port
+The client connects over TLS with `ERL_BRIDGE_TLS=1`, optionally verifying
+against a CA with `ERL_BRIDGE_TLS_CA`. TLS and authentication compose;
+either can be enabled without the other.
 
-Because every listening socket sets `SO_REUSEPORT`, starting a **second** server on the same port does not fail with `eaddrinuse` — it binds successfully, and the kernel splits connections between the instances. This is what allows scaling across processes and hosts, but it also means a duplicate launch is silent rather than an error. If you want to detect that case yourself, check for a listener on the port before starting.
+## Architecture
 
-## Erlang API
+```
+erl_bridge_app            application callback; resolves config, then starts
+└── erl_bridge_sup        top supervisor
+    ├── erl_bridge_metrics        counters/gauges in ETS
+    ├── erl_bridge_metrics_http   /metrics (only when configured)
+    └── erl_bridge_acceptor_sup    acceptor pool
+        └── erl_bridge_acceptor  × N, one shared listening socket
+            └── erl_bridge_conn  × M, one per connection
+```
+
+- Each acceptor holds the **same** listening socket (`SO_REUSEPORT`), so
+  the kernel spreads incoming connections across them. The socket is
+  owned by `erl_bridge_acceptor_sup` and closed once, after every acceptor
+  has exited — an acceptor closing it would break the others.
+- Acceptors are plain processes with an explicit `receive`. An earlier
+  `gen_server` version drove the loop from a timeout message and could
+  silently stop accepting; see the module docs for why.
+- Each connection is a `gen_server` that performs at most one bounded
+  receive per callback and yields in between, so it stays responsive to
+  shutdown rather than sitting inside one long `recv`.
+- The connection cap is enforced against a **shared** `atomics` counter.
+  A per-acceptor counter would silently multiply the limit by the
+  acceptor count.
+
+### Erlang API
 
 | Function | Description |
 |---|---|
-| `start_link(Port)` | Start with default acceptor count and connection cap |
-| `start_link(Port, AcceptorCount)` | Start with an explicit acceptor count |
-| `start_link(Port, AcceptorCount, MaxConnections)` | Start with both explicit; pass `undefined` for either to take the default |
-| `acceptor_count()` | The default acceptor count (schedulers, capped at 8) |
-| `connection_limit()` | The default concurrent worker cap (128) |
-| `stop(Pids)` | Stop the server; accepts a pid or list of pids |
+| `bridge_server:start/0,1,2` | Start the supervised application |
+| `bridge_server:stop/0` | Stop it, with a grace period |
+| `bridge_server:running/0` | Whether it is up |
+| `bridge_server:info/0` | Config, child pids, connection count, metrics |
+| `bridge_server:generate_token/1` | Generate a hex-encoded random token |
 
-`start_link/1,2,3` returns `{ok, Pids}` or `{error, Reason}`. If any acceptor fails to bind, the ones that already started are stopped, so no listener is left behind. It is linked to the calling process and is not an OTP behaviour process — there is no supervision tree, and `stop/1` returns before the listeners have actually closed (allow up to 1000 ms).
+`start_link/0,1,2` were renamed to `start/0,1,2` in 2.0 — they never were
+link-only constructors, and they now start a supervised application. The
+old names still work but are deprecated and will be removed in 3.0.
 
-### Generated API reference
+`stop/0` returns once the tree is down; an acceptor needs up to one accept
+timeout (default 1 s) to notice.
 
-The module carries edoc comments. To render them as HTML:
+## Metrics
 
-```sh
-bun run docs          # writes doc/ (gitignored)
+Set `ERL_BRIDGE_METRICS_PORT` to expose Prometheus metrics on
+`127.0.0.1:<port>/metrics`:
+
+```
+erl_bridge_requests_ok_total 1042
+erl_bridge_requests_overflow_total 0
+erl_bridge_handshake_auth_failed_total 3
+erl_bridge_connections_active 2
 ```
 
-Then open `doc/index.html` in a browser, or serve it:
+Counters carry a `_total` suffix; gauges do not. Every series is
+pre-seeded at zero, because Prometheus reads a missing series as *no data*
+rather than zero, which would silently break `rate()`.
 
-```sh
-python3 -m http.server 8765 --directory doc
-```
+The endpoint **binds to loopback only** and is unauthenticated. If a
+remote host must scrape it, put a proxy that authenticates in front.
+
+### Telemetry
+
+The server also emits ordinary [`telemetry`](https://hexdocs.pm/telemetry)
+events under `erl_bridge.*` — `connection.open`, `handshake.success`,
+`handshake.failure`, `request.idle_timeout`. Any backend can be attached
+in `erl_bridge_app:start/2` without touching call sites.
+
+The only dependency is `telemetry` itself. `telemetry_metrics_prometheus_core`
+was deliberately avoided: every release of `telemetry_metrics` is a mix
+project with no `rebar.config`, so it would force Elixir into an
+Erlang-only toolchain.
 
 ## Tests
 
@@ -123,35 +198,43 @@ python3 -m http.server 8765 --directory doc
 bun run test
 ```
 
-The EUnit suite in `test/bridge_server_tests.erl` covers the protocol (arithmetic, 64-bit boundaries and overflow, malformed frames), the concurrency guarantees (the connection cap holds and slots are reclaimed), and the API surface. It also asserts the multi-instance behaviour described above, so removing `{reuseport, true}` fails the suite rather than silently changing semantics. Each test uses its own port, so they can run alongside a server on 4040.
+70 EUnit tests: pure protocol encoding, config resolution and validation,
+token comparison, metrics rendering, and integration tests that start the
+real application and drive it over real sockets — handshake, version
+rejection, auth accept/reject, the connection cap, metrics, supervision,
+restart, and TLS.
 
-## Run the client on another machine
+Integration tests bind port 0, so they cannot collide with a server on
+4040. The TLS tests generate a throwaway self-signed certificate with
+`openssl` and skip if it is unavailable.
 
-Replace `192.0.2.10` with the server's reachable IP address:
+## Run the client against another machine
 
 ```sh
-ERLANG_HOST=192.0.2.10 ERLANG_PORT=4040 bun run src/client.ts
+ERL_BRIDGE_HOST=192.0.2.10 ERL_BRIDGE_PORT=4040 bun run src/client.ts
 ```
 
-Expected output:
-
-```text
-10 + 20 = 30
-9000000000 + 1 = 9000000001
--2 + 7 = 5
-```
+Client variables: `ERL_BRIDGE_HOST`, `ERL_BRIDGE_PORT`,
+`ERL_BRIDGE_TOKEN`, `ERL_BRIDGE_TLS`, `ERL_BRIDGE_TLS_CA`.
 
 ## Security and production notes
 
-The server binds to all interfaces and has no authentication or TLS. Only run it on a trusted private network or behind a firewall/VPN. Note that `SO_REUSEPORT` means any local process running as the same user can bind the port as well.
+The server has no TLS or authentication unless you configure them, and no
+per-client rate limiting — the connection cap bounds concurrency, not
+request rate. Put it on a trusted network or behind a proxy.
 
-There is a connection cap (default 128) and a 1 MiB frame cap, but no per-client rate limiting. Malformed frames close the connection silently — nothing is logged, so a client sending garbage leaves no trace.
+`SO_REUSEPORT` means any local process running as the same user can bind
+the port as well, so a duplicate launch is silent. Set
+`ERL_BRIDGE_REUSEPORT=false` if you would rather a duplicate launch fail
+loudly with `eaddrinuse`; with it off, a single instance owns the port.
 
-For production, add TLS or private-network authentication, request deadlines, version negotiation, explicit error codes, monitoring, and supervised workers. `start_link/1` is not a supervisor behaviour; wrap it in one. Benchmark using the real workload before assuming TCP improves throughput.
+Still to add for a real service: per-client rate limiting, authorisation
+of individual operations, request pipelining, and a protocol version
+registry for negotiating future changes.
 
-## Known limitations
+## Generated API reference
 
-- A duplicate server launch on the same port is silent rather than an error (see above).
-- Malformed traffic is not logged; a client sending garbage leaves no trace.
-- The client handles one in-flight request at a time, by design. There is no multiplexing or request pipelining.
-- Neither side negotiates a protocol version.
+```sh
+bun run docs
+python3 -m http.server 8765 --directory doc
+```

@@ -1,0 +1,16 @@
+%% Application resource file for the erl_bridge TCP bridge.
+{application, erl_bridge, [
+    {description, "Authenticated, supervised TCP bridge server (Erlang/OTP)"},
+    {vsn, "2.0.0"},
+    {registered, [erl_bridge_sup, erl_bridge_acceptor_sup]},
+    {mod, {erl_bridge_app, []}},
+    {applications, [kernel,
+                     stdlib,
+                     crypto,
+                     ssl,
+                     telemetry]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, []}
+]}.
